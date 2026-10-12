@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>SwiftDrop — Shop & Delivery</title>
+<link rel="stylesheet" href="css/styles.css" />
+<script src="https://cdnjs.cloudflare.com/ajax/libs/sockjs-client/1.6.1/sockjs.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/stomp.js/2.3.3/stomp.min.js"></script>
+</head>
+<body>
+<div class="navbar shop-nav">
+  <div class="brand"><span class="dot"></span> SwiftDrop</div>
+  <div class="shop-search"><input id="productSearch" class="input" placeholder="Search products…" onkeydown="if(event.key==='Enter') searchProducts()" /><button class="btn btn-primary btn-sm" onclick="searchProducts()">Search</button></div>
+  <div class="nav-actions"><button class="btn btn-outline btn-sm" onclick="scrollToCart()">🛒 Cart <span id="cartCount" class="cart-count">0</span></button><span id="userName" style="font-weight:600"></span><button class="btn btn-outline btn-sm" onclick="logout()">Log out</button></div>
+</div>
+
+<div class="container">
+  <div class="shop-hero">
+    <div><div class="shop-kicker">FAST LOCAL DELIVERY</div><h1>Everything you need, delivered by SwiftDrop.</h1><p>Browse live products, add them to your cart, checkout with your address, and track delivery in real time.</p></div>
+    <div class="shop-hero-icon">🛍️</div>
+  </div>
+
+  <div class="category-strip" id="categoryStrip"><button class="category-chip active" onclick="loadProducts()">All</button><span class="loading-text">Loading categories…</span></div>
+
+  <div class="shop-layout">
+    <main>
+      <div class="section-bar"><div><div class="section-title">🛍️ Products</div><div class="order-meta" id="productMeta">Loading live catalogue…</div></div><select class="input sort-select" id="sortSelect" onchange="sortProducts()"><option value="title-asc">Name A–Z</option><option value="price-asc">Price low to high</option><option value="price-desc">Price high to low</option><option value="rating-desc">Top rated</option></select></div>
+      <div id="productGrid" class="product-grid"><div class="empty-state">Loading live products…</div></div>
+    </main>
+
+    <aside id="cartPanel" class="card cart-panel">
+      <div class="section-title">🛒 Your cart</div>
+      <div id="cartItems"><div class="empty-state">Your cart is empty.</div></div>
+      <div id="cartSummary" style="display:none">
+        <div class="cart-total"><span>Total</span><strong id="cartTotal">$0.00</strong></div>
+        <div class="field"><label>Delivery address</label><textarea id="deliveryAddress" class="input" rows="3" placeholder="Flat / building, street, area, city" required></textarea></div>
+        <button class="btn btn-primary" style="width:100%" onclick="checkout()">Proceed to checkout</button>
+      </div>
+    </aside>
+  </div>
+
+  <div class="card" style="margin-top:24px">
+    <div class="section-title">🧾 Your orders & live tracking</div>
+    <div id="ordersList" class="empty-state">Loading your orders…</div>
+  </div>
+</div>
+
+<!-- Product details -->
+<div class="modal-backdrop" id="productModal" style="display:none"><div class="modal product-modal"><button class="modal-close btn btn-outline btn-sm" onclick="closeProductModal()">✕</button><div id="productDetail"></div></div></div>
+
+<!-- Order details / chat -->
+<div class="modal-backdrop" id="modalBackdrop" style="display:none"><div class="modal">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px"><div style="font-weight:700;font-size:1.1rem">Order details</div><button class="btn btn-outline btn-sm" onclick="closeModal()">✕</button></div>
+  <div id="modalStatus" style="margin-bottom:14px"></div><div id="orderItemsPreview" class="order-items-preview"></div>
+  <div id="chatSection" style="display:none"><div class="chat-window" id="chatWindow"></div><div style="display:flex;gap:8px;margin-top:10px"><input class="input" id="chatInput" placeholder="Message your delivery partner…" onkeydown="if(event.key==='Enter'){sendChat();}" /><button class="btn btn-primary btn-sm" onclick="sendChat()">Send</button></div><div style="margin-top:10px"><button class="btn btn-danger btn-sm" onclick="cancelCurrentOrder()">Cancel order</button></div></div>
+</div></div>
+
+<script src="js/api.js"></script><script src="js/ws.js"></script>
+<script>
+const PRODUCTS_API='https://dummyjson.com/products';
+const user=Auth.requireRole('CUSTOMER');
+document.getElementById('userName').textContent=user.name;
+let products=[]; let cart=JSON.parse(localStorage.getItem('swiftdrop_cart')||'[]'); let selectedCategory=''; let currentOrderId=null; let chatClient=null;
+
+loadProducts(); loadCategories(); loadCart(); loadOrders();
+connectNotifications((n)=>{ toast(n.notification.title+': '+n.notification.message,'info'); renderNotification(n.notification); loadOrders(); });
+
+async function loadProducts(url=PRODUCTS_API+'?limit=0'){ const grid=document.getElementById('productGrid'); grid.innerHTML='<div class="empty-state">Loading live products…</div>'; try{ const r=await fetch(url); if(!r.ok) throw new Error('Product API unavailable'); const data=await r.json(); products=data.products||[]; productMeta.textContent=`${products.length} live products from the catalogue API`; renderProducts(); }catch(e){grid.innerHTML='<div class="empty-state">Could not load live products. Check your internet connection and refresh.</div>';toast(e.message,'error');}}
+async function loadCategories(){try{const r=await fetch(PRODUCTS_API+'/categories');const cats=await r.json();categoryStrip.innerHTML='<button class="category-chip active" onclick="selectCategory(\"\",this)">All</button>'+cats.map(c=>`<button class="category-chip" onclick="selectCategory('${c.slug}',this)">${c.name}</button>`).join('');}catch{categoryStrip.innerHTML='<button class="category-chip active">All</button>';}}
+async function selectCategory(cat,btn){document.querySelectorAll('.category-chip').forEach(x=>x.classList.remove('active'));btn.classList.add('active');selectedCategory=cat;if(cat) await loadProducts(PRODUCTS_API+'/category/'+encodeURIComponent(cat)); else await loadProducts();}
+async function searchProducts(){const q=document.getElementById('productSearch').value.trim(); if(!q){return loadProducts(selectedCategory?PRODUCTS_API+'/category/'+encodeURIComponent(selectedCategory):undefined);} await loadProducts(PRODUCTS_API+'/search?q='+encodeURIComponent(q));}
+function sortProducts(){const [field,order]=document.getElementById('sortSelect').value.split('-');products=[...products].sort((a,b)=>{let av=field==='title'?a.title:field==='rating'?a.rating:a.price;let bv=field==='title'?b.title:field==='rating'?b.rating:b.price;return (av>bv?1:av<bv?-1:0)*(order==='desc'?-1:1)});renderProducts();}
+function renderProducts(){const grid=document.getElementById('productGrid');if(!products.length){grid.innerHTML='<div class="empty-state">No products found.</div>';return;}grid.innerHTML=products.map(p=>`<article class="product-card"><img src="${p.thumbnail||p.images?.[0]||''}" alt="${escapeHtml(p.title)}" loading="lazy"><div class="product-body"><div class="product-category">${escapeHtml(p.category)}</div><h3>${escapeHtml(p.title)}</h3><p>${escapeHtml(p.description||'')}</p><div class="rating">★ ${Number(p.rating||0).toFixed(1)} <span>· ${p.stock} in stock</span></div><div class="product-bottom"><strong>$${Number(p.price).toFixed(2)}</strong><div><button class="btn btn-outline btn-sm" onclick="showProduct(${p.id})">Details</button><button class="btn btn-primary btn-sm" onclick="addToCart(${p.id})">Add</button></div></div></div></article>`).join('');}
+function showProduct(id){const p=products.find(x=>x.id===id);if(!p)return;document.getElementById('productDetail').innerHTML=`<img class="detail-image" src="${p.images?.[0]||p.thumbnail||''}" alt="${escapeHtml(p.title)}"><div><div class="product-category">${escapeHtml(p.category)}</div><h2>${escapeHtml(p.title)}</h2><div class="rating">★ ${Number(p.rating||0).toFixed(1)} · ${p.availabilityStatus||'Available'}</div><p>${escapeHtml(p.description||'')}</p><div class="detail-price">$${Number(p.price).toFixed(2)}</div><p class="order-meta">${escapeHtml(p.shippingInformation||'Standard delivery available')}</p><button class="btn btn-primary" onclick="addToCart(${p.id});closeProductModal()">Add to cart</button></div>`;document.getElementById('productModal').style.display='flex';}
+function closeProductModal(){document.getElementById('productModal').style.display='none';}
+function addToCart(id){const p=products.find(x=>x.id===id);if(!p)return;const existing=cart.find(x=>x.id===id);if(existing)existing.qty=Math.min(existing.qty+1,p.stock||99);else cart.push({id:p.id,title:p.title,price:Number(p.price),thumbnail:p.thumbnail||p.images?.[0]||'',qty:1,stock:p.stock||99});saveCart();toast(`${p.title} added to cart`,'success');}
+function changeQty(id,delta){const item=cart.find(x=>x.id===id);if(!item)return;item.qty=Math.max(0,Math.min(item.stock,item.qty+delta));cart=cart.filter(x=>x.qty>0);saveCart();}
+function removeCart(id){cart=cart.filter(x=>x.id!==id);saveCart();}
+function saveCart(){localStorage.setItem('swiftdrop_cart',JSON.stringify(cart));loadCart();}
+function loadCart(){document.getElementById('cartCount').textContent=cart.reduce((s,x)=>s+x.qty,0);const box=document.getElementById('cartItems');const summary=document.getElementById('cartSummary');if(!cart.length){box.innerHTML='<div class="empty-state">Your cart is empty.<br><small>Add products from the live catalogue.</small></div>';summary.style.display='none';return;}box.innerHTML=cart.map(x=>`<div class="cart-item"><img src="${x.thumbnail}" alt=""><div class="cart-item-main"><strong>${escapeHtml(x.title)}</strong><span>$${x.price.toFixed(2)} × ${x.qty}</span><div class="qty"><button onclick="changeQty(${x.id},-1)">−</button><b>${x.qty}</b><button onclick="changeQty(${x.id},1)">+</button><button class="remove" onclick="removeCart(${x.id})">Remove</button></div></div><strong>$${(x.price*x.qty).toFixed(2)}</strong></div>`).join('');const total=cart.reduce((s,x)=>s+x.price*x.qty,0);document.getElementById('cartTotal').textContent='$'+total.toFixed(2);summary.style.display='block';}
+function scrollToCart(){document.getElementById('cartPanel').scrollIntoView({behavior:'smooth'});}
+async function checkout(){const address=document.getElementById('deliveryAddress').value.trim();if(!address){toast('Enter your delivery address first','error');return;}if(!cart.length){toast('Your cart is empty','error');return;}const total=cart.reduce((s,x)=>s+x.price*x.qty,0);const itemDescription=cart.map(x=>`${x.qty}x ${x.title}`).join(', ');try{await api('/api/customer/orders',{method:'POST',body:{pickupAddress:'SwiftDrop Store',dropAddress:address,itemDescription,amount:Number(total.toFixed(2))}});cart=[];saveCart();document.getElementById('deliveryAddress').value='';toast('Order placed successfully — finding a delivery partner!','success');loadOrders();window.scrollTo({top:document.body.scrollHeight,behavior:'smooth'});}catch(e){toast(e.message,'error');}}
+
+async function loadOrders(){try{const orders=await api('/api/customer/orders');const list=document.getElementById('ordersList');if(!orders.length){list.innerHTML='<div class="empty-state">No orders yet. Add products and checkout to create your first delivery.</div>';return;}list.innerHTML=orders.map(o=>`<div class="order-row"><div><div style="font-weight:600">${escapeHtml(o.itemDescription||'SwiftDrop order')}</div><div class="order-meta">Deliver to: ${escapeHtml(o.dropAddress||'')} · ${timeAgo(o.createdAt)}</div></div><div style="display:flex;align-items:center;gap:12px">${statusBadge(o.status)}<button class="btn btn-outline btn-sm" onclick="openOrder('${o.id}','${o.status}')">Track / Chat</button></div></div>`).join('');}catch(e){toast(e.message,'error');}}
+function renderNotification(n){const el=document.getElementById('notifList');if(!el)return;}
+async function openOrder(orderId,status){currentOrderId=orderId;document.getElementById('modalBackdrop').style.display='flex';document.getElementById('modalStatus').innerHTML=`Status: ${statusBadge(status)}`;document.getElementById('chatSection').style.display=!['LOOKING_FOR_PARTNER','PLACED','CANCELLED'].includes(status)?'block':'none';try{const orders=await api('/api/customer/orders');const o=orders.find(x=>String(x.id)===String(orderId));if(o)document.getElementById('orderItemsPreview').innerHTML=`<div><strong>Delivery:</strong> ${escapeHtml(o.dropAddress||'')}</div><div><strong>Items:</strong> ${escapeHtml(o.itemDescription||'')}</div><div><strong>Amount:</strong> $${Number(o.amount||0).toFixed(2)}</div>`;}catch{}if(document.getElementById('chatSection').style.display==='none')return;try{const history=await api(`/api/customer/deliveries/${orderId}/chat`);document.getElementById('chatWindow').innerHTML=history.map(renderBubble).join('');scrollChatToBottom();}catch{}if(chatClient){try{chatClient.disconnect()}catch{} }chatClient=connectOrderChat(orderId,msg=>{document.getElementById('chatWindow').insertAdjacentHTML('beforeend',renderBubble(msg));scrollChatToBottom();});}
+function renderBubble(msg){const mine=msg.senderRole==='CUSTOMER';return `<div class="chat-bubble ${mine?'mine':'theirs'}">${escapeHtml(msg.message)}</div>`;}function scrollChatToBottom(){const w=document.getElementById('chatWindow');w.scrollTop=w.scrollHeight;}
+async function sendChat(){const input=document.getElementById('chatInput');if(!input.value.trim())return;try{await api(`/api/customer/deliveries/${currentOrderId}/chat`,{method:'POST',body:{message:input.value}});input.value='';}catch(e){toast(e.message,'error');}}
+async function cancelCurrentOrder(){if(!confirm('Cancel this order?'))return;try{await api(`/api/customer/orders/${currentOrderId}/cancel`,{method:'POST'});toast('Order cancelled','success');closeModal();loadOrders();}catch(e){toast(e.message,'error');}}
+function closeModal(){document.getElementById('modalBackdrop').style.display='none';if(chatClient){try{chatClient.disconnect()}catch{}chatClient=null;}}
+function escapeHtml(v){return String(v??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));}
+</script>
+</body>
+</html>

@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>SwiftDrop — Delivery Partner</title>
+<link rel="stylesheet" href="css/styles.css" />
+<script src="https://cdnjs.cloudflare.com/ajax/libs/sockjs-client/1.6.1/sockjs.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/stomp.js/2.3.3/stomp.min.js"></script>
+</head>
+<body>
+
+<div class="navbar">
+  <div class="brand"><span class="dot"></span> SwiftDrop <span style="font-size:0.7rem; color:var(--text-muted); font-weight:600; margin-left:6px">RIDER</span></div>
+  <div class="nav-actions">
+    <div class="avail-toggle">
+      <button class="btn btn-sm" id="btnAvailable" onclick="setAvailability('AVAILABLE')">🟢 Available</button>
+      <button class="btn btn-sm" id="btnOffline" onclick="setAvailability('OFFLINE')">⚪ Offline</button>
+    </div>
+    <span id="userName" style="font-weight:600"></span>
+    <button class="btn btn-outline btn-sm" onclick="logout()">Log out</button>
+  </div>
+</div>
+
+<div class="container">
+
+  <div class="card" id="offerCard" style="display:none; border: 2px solid var(--primary); margin-bottom:24px;">
+    <div class="section-title">🆕 New delivery request</div>
+    <div id="offerBody"></div>
+    <div style="display:flex; gap:10px; margin-top:14px">
+      <button class="btn btn-success" onclick="acceptOffer()">Accept</button>
+      <button class="btn btn-danger" onclick="rejectOffer()">Reject</button>
+    </div>
+  </div>
+
+  <div class="grid grid-2">
+    <div class="card">
+      <div class="section-title">🚚 Active / recent deliveries</div>
+      <div id="ordersList" class="empty-state">Loading…</div>
+    </div>
+    <div class="card">
+      <div class="section-title">🔔 Notifications</div>
+      <div id="notifList" class="empty-state">No notifications yet.</div>
+    </div>
+  </div>
+</div>
+
+<!-- Order detail / chat modal -->
+<div class="modal-backdrop" id="modalBackdrop" style="display:none">
+  <div class="modal">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:14px">
+      <div style="font-weight:700; font-size:1.1rem">Delivery</div>
+      <button class="btn btn-outline btn-sm" onclick="closeModal()">✕</button>
+    </div>
+    <div id="modalStatus" style="margin-bottom:14px"></div>
+    <div class="field">
+      <label>Update status</label>
+      <select class="input" id="statusSelect" onchange="updateStatus()">
+        <option value="ACCEPTED">Accepted</option>
+        <option value="PICKED_UP">Picked up</option>
+        <option value="IN_TRANSIT">In transit</option>
+        <option value="DELIVERED">Delivered</option>
+      </select>
+    </div>
+    <div class="chat-window" id="chatWindow"></div>
+    <div style="display:flex; gap:8px; margin-top:10px">
+      <input class="input" id="chatInput" placeholder="Message the customer…" onkeydown="if(event.key==='Enter'){sendChat();}" />
+      <button class="btn btn-primary btn-sm" onclick="sendChat()">Send</button>
+    </div>
+  </div>
+</div>
+
+<script src="js/api.js"></script>
+<script src="js/ws.js"></script>
+<script>
+  const user = Auth.requireRole('DELIVERY_PARTNER');
+  document.getElementById('userName').textContent = user.name;
+
+  let currentOrderId = null;
+  let chatClient = null;
+  let currentAvailability = 'OFFLINE';
+
+  loadOrders();
+  pollOffers();
+  setInterval(pollOffers, 8000);
+
+  connectNotifications((n) => {
+    toast(n.notification.title + ': ' + n.notification.message, 'info');
+    renderNotification(n.notification);
+    if (n.notification.type === 'NEW_ORDER_OFFER') pollOffers();
+    loadOrders();
+  });
+
+  function setAvailability(status) {
+    currentAvailability = status;
+    document.getElementById('btnAvailable').style.opacity = status === 'AVAILABLE' ? 1 : 0.5;
+    document.getElementById('btnOffline').style.opacity = status === 'OFFLINE' ? 1 : 0.5;
+    api('/staff/deliveries/availability', { method: 'PUT', body: { status } })
+      .then(() => toast(`You're now ${status.toLowerCase()}`, 'success'))
+      .catch(err => toast(err.message, 'error'));
+  }
+
+  async function pollOffers() {
+    try {
+      const offers = await api('/staff/deliveries/offers');
+      if (offers.length) {
+        const o = offers[0];
+        document.getElementById('offerCard').style.display = 'block';
+        document.getElementById('offerCard').dataset.orderId = o.orderId;
+        document.getElementById('offerBody').innerHTML =
+          `<div><strong>Pickup:</strong> ${o.pickupAddress}</div><div><strong>Drop:</strong> ${o.dropAddress}</div>`;
+      } else {
+        document.getElementById('offerCard').style.display = 'none';
+      }
+    } catch (err) { /* silent poll failure */ }
+  }
+
+  async function acceptOffer() {
+    const orderId = document.getElementById('offerCard').dataset.orderId;
+    try {
+      await api(`/staff/deliveries/${orderId}/accept`, { method: 'POST' });
+      toast('Order accepted!', 'success');
+      document.getElementById('offerCard').style.display = 'none';
+      loadOrders();
+    } catch (err) { toast(err.message, 'error'); }
+  }
+
+  async function rejectOffer() {
+    const orderId = document.getElementById('offerCard').dataset.orderId;
+    try {
+      await api(`/staff/deliveries/${orderId}/reject`, { method: 'POST' });
+      toast('Order rejected', 'info');
+      document.getElementById('offerCard').style.display = 'none';
+      pollOffers();
+    } catch (err) { toast(err.message, 'error'); }
+  }
+
+  async function loadOrders() {
+    try {
+      const orders = await api('/staff/orders');
+      const list = document.getElementById('ordersList');
+      if (!orders.length) { list.innerHTML = '<div class="empty-state">No deliveries yet — go available to start receiving offers.</div>'; return; }
+      list.innerHTML = orders.map(o => `
+        <div class="order-row">
+          <div>
+            <div style="font-weight:600">${o.pickupAddress} → ${o.dropAddress}</div>
+            <div class="order-meta">${timeAgo(o.createdAt)}</div>
+          </div>
+          <div style="display:flex; align-items:center; gap:12px">
+            ${statusBadge(o.status)}
+            <button class="btn btn-outline btn-sm" onclick="openOrder('${o.id}','${o.status}')">Manage</button>
+          </div>
+        </div>
+      `).join('');
+    } catch (err) { toast(err.message, 'error'); }
+  }
+
+  function renderNotification(n) {
+    const el = document.getElementById('notifList');
+    const item = `<div class="order-row"><div><div style="font-weight:600">${n.title}</div>
+      <div class="order-meta">${n.message}</div></div></div>`;
+    if (el.classList.contains('empty-state')) { el.className = ''; el.innerHTML = item; }
+    else el.insertAdjacentHTML('afterbegin', item);
+  }
+
+  async function openOrder(orderId, status) {
+    currentOrderId = orderId;
+    document.getElementById('modalBackdrop').style.display = 'flex';
+    document.getElementById('modalStatus').innerHTML = `Status: ${statusBadge(status)}`;
+    document.getElementById('statusSelect').value = status === 'ACCEPTED' ? 'ACCEPTED' : status;
+
+    try {
+      const history = await api(`/staff/deliveries/${orderId}/chat`);
+      document.getElementById('chatWindow').innerHTML = history.map(renderBubble).join('');
+      scrollChatToBottom();
+    } catch {}
+
+    if (chatClient) { try { chatClient.disconnect(); } catch {} }
+    chatClient = connectOrderChat(orderId, (msg) => {
+      document.getElementById('chatWindow').insertAdjacentHTML('beforeend', renderBubble(msg));
+      scrollChatToBottom();
+    });
+  }
+
+  function renderBubble(msg) {
+    const mine = msg.senderRole === 'DELIVERY_PARTNER';
+    return `<div class="chat-bubble ${mine ? 'mine' : 'theirs'}">${msg.message}</div>`;
+  }
+  function scrollChatToBottom() {
+    const w = document.getElementById('chatWindow');
+    w.scrollTop = w.scrollHeight;
+  }
+
+  async function sendChat() {
+    const input = document.getElementById('chatInput');
+    if (!input.value.trim()) return;
+    try {
+      await api(`/staff/deliveries/${currentOrderId}/chat`, { method: 'POST', body: { message: input.value } });
+      input.value = '';
+    } catch (err) { toast(err.message, 'error'); }
+  }
+
+
+  async function updateStatus() {
+    const status = document.getElementById('statusSelect').value;
+    try {
+      await api(`/staff/deliveries/${currentOrderId}/status`, { method: 'PATCH', body: { status } });
+      toast('Status updated', 'success');
+      loadOrders();
+    } catch (err) { toast(err.message, 'error'); }
+  }
+
+  function closeModal() {
+    document.getElementById('modalBackdrop').style.display = 'none';
+    if (chatClient) { try { chatClient.disconnect(); } catch {} chatClient = null; }
+  }
+</script>
+</body>
+</html>

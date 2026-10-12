@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>SwiftDrop — Admin</title>
+<link rel="stylesheet" href="css/styles.css" />
+</head>
+<body>
+
+<div class="navbar">
+  <div class="brand"><span class="dot"></span> SwiftDrop <span style="font-size:0.7rem; color:var(--text-muted); font-weight:600; margin-left:6px">ADMIN</span></div>
+  <div class="nav-actions">
+    <span id="userName" style="font-weight:600"></span>
+    <button class="btn btn-outline btn-sm" onclick="logout()">Log out</button>
+  </div>
+</div>
+
+<div class="container">
+  <div class="tabs">
+    <div class="tab active" id="tabOrders" onclick="switchTab('orders')">All orders</div>
+    <div class="tab" id="tabPartners" onclick="switchTab('partners')">Delivery partners</div>
+  </div>
+
+  <div id="ordersPane" class="card">
+    <div class="section-title">🧾 All orders</div>
+    <div id="ordersList" class="empty-state">Loading…</div>
+  </div>
+
+  <div id="partnersPane" class="card" style="display:none">
+    <div class="section-title">🛵 Delivery partners</div>
+    <div id="partnersList" class="empty-state">Loading…</div>
+  </div>
+</div>
+
+<!-- Assign modal -->
+<div class="modal-backdrop" id="modalBackdrop" style="display:none">
+  <div class="modal">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:14px">
+      <div style="font-weight:700; font-size:1.1rem">Assign delivery partner</div>
+      <button class="btn btn-outline btn-sm" onclick="closeModal()">✕</button>
+    </div>
+    <div class="field">
+      <label>Choose a partner</label>
+      <select class="input" id="partnerSelect"></select>
+    </div>
+    <button class="btn btn-primary" style="width:100%" onclick="confirmAssign()">Assign</button>
+  </div>
+</div>
+
+<script src="js/api.js"></script>
+<script>
+  const user = Auth.requireRole('ADMIN');
+  document.getElementById('userName').textContent = user.name;
+
+  let assignOrderId = null;
+  let cachedPartners = [];
+
+  loadOrders();
+  loadPartners();
+  setInterval(() => { loadOrders(); loadPartners(); }, 15000);
+
+  function switchTab(tab) {
+    document.getElementById('tabOrders').classList.toggle('active', tab === 'orders');
+    document.getElementById('tabPartners').classList.toggle('active', tab === 'partners');
+    document.getElementById('ordersPane').style.display = tab === 'orders' ? 'block' : 'none';
+    document.getElementById('partnersPane').style.display = tab === 'partners' ? 'block' : 'none';
+  }
+
+  async function loadOrders() {
+    try {
+      const orders = await api('/admin/orders');
+      const list = document.getElementById('ordersList');
+      if (!orders.length) { list.innerHTML = '<div class="empty-state">No orders placed yet.</div>'; return; }
+      list.innerHTML = orders.map(o => `
+        <div class="order-row">
+          <div>
+            <div style="font-weight:600">${o.pickupAddress} → ${o.dropAddress}</div>
+            <div class="order-meta">Customer: ${o.customerId.slice(0,8)}… · ${timeAgo(o.createdAt)}
+              ${o.assignedDeliveryPartnerId ? ' · Partner: ' + o.assignedDeliveryPartnerId.slice(0,8) + '…' : ''}</div>
+          </div>
+          <div style="display:flex; align-items:center; gap:12px">
+            ${statusBadge(o.status)}
+            <button class="btn btn-outline btn-sm" onclick="openAssign('${o.id}')">Assign</button>
+          </div>
+        </div>
+      `).join('');
+    } catch (err) { toast(err.message, 'error'); }
+  }
+
+  async function loadPartners() {
+    try {
+      cachedPartners = await api('/admin/delivery-partners');
+      const list = document.getElementById('partnersList');
+      if (!cachedPartners.length) { list.innerHTML = '<div class="empty-state">No delivery partners registered yet.</div>'; return; }
+      list.innerHTML = cachedPartners.map(p => `
+        <div class="order-row">
+          <div>
+            <div style="font-weight:600">${p.name}</div>
+            <div class="order-meta">${p.email}${p.currentOrderId ? ' · on order ' + p.currentOrderId.slice(0,8) + '…' : ''}</div>
+          </div>
+          <span class="badge badge-${p.status.toLowerCase()}">${p.status}</span>
+        </div>
+      `).join('');
+    } catch (err) { toast(err.message, 'error'); }
+  }
+
+  function openAssign(orderId) {
+    assignOrderId = orderId;
+    const select = document.getElementById('partnerSelect');
+    select.innerHTML = cachedPartners.map(p => `<option value="${p.id}">${p.name} (${p.status})</option>`).join('')
+      || '<option disabled>No partners available</option>';
+    document.getElementById('modalBackdrop').style.display = 'flex';
+  }
+
+  async function confirmAssign() {
+    const partnerId = document.getElementById('partnerSelect').value;
+    try {
+      await api(`/admin/orders/${assignOrderId}/assign`, { method: 'POST', body: { deliveryPartnerId: partnerId } });
+      toast('Delivery partner assigned', 'success');
+      closeModal();
+      loadOrders();
+    } catch (err) { toast(err.message, 'error'); }
+  }
+
+  function closeModal() {
+    document.getElementById('modalBackdrop').style.display = 'none';
+  }
+</script>
+</body>
+</html>

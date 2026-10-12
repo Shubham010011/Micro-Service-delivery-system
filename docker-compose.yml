@@ -1,0 +1,190 @@
+name: realtime-delivery-system
+
+x-common-env: &common-env
+  EUREKA_URL: http://eureka-server:8761/eureka/
+  JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env (openssl rand -base64 48)}
+  DB_USERNAME: ${DB_USERNAME:-swiftdrop}
+  DB_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in .env}
+  DB_DRIVER: org.postgresql.Driver
+
+services:
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: swiftdrop-postgres
+    environment:
+      POSTGRES_USER: ${DB_USERNAME:-swiftdrop}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in .env}
+      POSTGRES_DB: ${DB_USERNAME:-swiftdrop}
+    ports: ["127.0.0.1:5432:5432"]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./init-scripts:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks: [swiftdrop-net]
+
+  eureka-server:
+    build:
+      context: .
+      dockerfile: ./eureka-server/Dockerfile
+    container_name: eureka-server
+    environment:
+      EUREKA_HOSTNAME: eureka-server
+    ports: ["127.0.0.1:8761:8761"]
+    networks: [swiftdrop-net]
+
+  api-gateway:
+    build:
+      context: .
+      dockerfile: ./api-gateway/Dockerfile
+    container_name: api-gateway
+    depends_on: [eureka-server]
+    environment:
+      <<: *common-env
+      CORS_ALLOWED_ORIGINS: "http://localhost:3000,http://localhost:5500,http://127.0.0.1:5500"
+    ports: ["8080:8080"]
+    networks: [swiftdrop-net]
+
+  auth-service:
+    build:
+      context: .
+      dockerfile: ./auth-service/Dockerfile
+    container_name: auth-service
+    depends_on:
+      eureka-server: { condition: service_started }
+      postgres: { condition: service_healthy }
+    environment:
+      <<: *common-env
+      DB_URL: jdbc:postgresql://postgres:5432/authdb
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-REPLACE_WITH_YOUR_GOOGLE_OAUTH_CLIENT_ID}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+    networks: [swiftdrop-net]
+
+  order-service:
+    build:
+      context: .
+      dockerfile: ./order-service/Dockerfile
+    container_name: order-service
+    depends_on:
+      eureka-server: { condition: service_started }
+      postgres: { condition: service_healthy }
+    environment:
+      <<: *common-env
+      DB_URL: jdbc:postgresql://postgres:5432/orderdb
+    networks: [swiftdrop-net]
+
+  delivery-service:
+    build:
+      context: .
+      dockerfile: ./delivery-service/Dockerfile
+    container_name: delivery-service
+    depends_on:
+      eureka-server: { condition: service_started }
+      postgres: { condition: service_healthy }
+    environment:
+      <<: *common-env
+      DB_URL: jdbc:postgresql://postgres:5432/deliverydb
+    networks: [swiftdrop-net]
+
+  notification-service:
+    build:
+      context: .
+      dockerfile: ./notification-service/Dockerfile
+    container_name: notification-service
+    depends_on:
+      eureka-server: { condition: service_started }
+      postgres: { condition: service_healthy }
+    environment:
+      <<: *common-env
+      DB_URL: jdbc:postgresql://postgres:5432/notificationdb
+    networks: [swiftdrop-net]
+
+  frontend:
+    image: nginx:alpine
+    container_name: swiftdrop-frontend
+    volumes:
+      - ./frontend:/usr/share/nginx/html:ro
+    ports: ["3000:80"]
+    networks: [swiftdrop-net]
+
+  # ---------------- Monitoring: Prometheus + Grafana ----------------
+
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    container_name: prometheus
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports: ["9090:9090"]
+    networks: [swiftdrop-net]
+
+  grafana:
+    image: grafana/grafana:11.1.0
+    container_name: grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning
+      - grafana-data:/var/lib/grafana
+    ports: ["3001:3000"]
+    depends_on: [prometheus]
+    networks: [swiftdrop-net]
+
+  # ---------------- Centralized logging: ELK ----------------
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.14.3
+    container_name: elasticsearch
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: "-Xms1g -Xmx1g"
+    volumes:
+      - esdata:/usr/share/elasticsearch/data
+    ports: ["9200:9200"]
+    networks: [swiftdrop-net]
+
+  logstash:
+    image: docker.elastic.co/logstash/logstash:8.14.3
+    container_name: logstash
+    volumes:
+      - ./elk/logstash/pipeline:/usr/share/logstash/pipeline:ro
+      - ./elk/logstash/logstash.yml:/usr/share/logstash/config/logstash.yml:ro
+    ports: ["5044:5044"]
+    depends_on: [elasticsearch]
+    networks: [swiftdrop-net]
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.14.3
+    container_name: kibana
+    environment:
+      ELASTICSEARCH_HOSTS: '["http://elasticsearch:9200"]'
+    ports: ["5601:5601"]
+    depends_on: [elasticsearch]
+    networks: [swiftdrop-net]
+
+  filebeat:
+    image: docker.elastic.co/beats/filebeat:8.14.3
+    container_name: filebeat
+    user: root
+    command: ["--strict.perms=false", "-e"]
+    volumes:
+      - ./elk/filebeat/filebeat.yml:/usr/share/filebeat/filebeat.yml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+    depends_on: [logstash]
+    networks: [swiftdrop-net]
+
+networks:
+  swiftdrop-net:
+    driver: bridge
+
+volumes:
+  pgdata:
+  esdata:
+  grafana-data:

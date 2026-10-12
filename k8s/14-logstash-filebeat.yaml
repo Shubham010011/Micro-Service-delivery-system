@@ -1,0 +1,161 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: logstash-pipeline
+  namespace: swiftdrop
+data:
+  logstash.conf: |
+    input {
+      beats { port => 5044 }
+    }
+    filter {
+      if [kubernetes][labels][app] {
+        mutate { add_field => { "service_name" => "%{[kubernetes][labels][app]}" } }
+      }
+      grok {
+        match => { "message" => "%{TIMESTAMP_ISO8601:log_timestamp}\s+\[%{DATA:thread}\]\s+%{LOGLEVEL:level}\s+%{DATA:logger}\s+-\s+%{GREEDYDATA:log_message}" }
+        tag_on_failure => ["_grokparsefailure_plain"]
+      }
+    }
+    output {
+      elasticsearch {
+        hosts => ["http://elasticsearch:9200"]
+        index => "swiftdrop-logs-%{+YYYY.MM.dd}"
+      }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: logstash
+  namespace: swiftdrop
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: logstash }
+  template:
+    metadata:
+      labels: { app: logstash }
+    spec:
+      containers:
+        - name: logstash
+          image: docker.elastic.co/logstash/logstash:8.14.3
+          ports: [{ containerPort: 5044 }]
+          volumeMounts:
+            - name: pipeline
+              mountPath: /usr/share/logstash/pipeline
+          resources:
+            requests: { cpu: "200m", memory: "512Mi" }
+            limits: { cpu: "1", memory: "1Gi" }
+      volumes:
+        - name: pipeline
+          configMap: { name: logstash-pipeline }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: logstash
+  namespace: swiftdrop
+spec:
+  selector: { app: logstash }
+  ports:
+    - port: 5044
+      targetPort: 5044
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: filebeat-config
+  namespace: swiftdrop
+data:
+  filebeat.yml: |
+    filebeat.autodiscover:
+      providers:
+        - type: kubernetes
+          node: ${NODE_NAME}
+          hints.enabled: true
+          templates:
+            - condition:
+                equals:
+                  kubernetes.namespace: swiftdrop
+              config:
+                - type: container
+                  paths:
+                    - "/var/log/containers/*${data.kubernetes.container.id}.log"
+    processors:
+      - add_kubernetes_metadata:
+          host: ${NODE_NAME}
+          matchers:
+            - logs_path:
+                logs_path: "/var/log/containers/"
+    output.logstash:
+      hosts: ["logstash:5044"]
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: filebeat
+  namespace: swiftdrop
+spec:
+  selector:
+    matchLabels: { app: filebeat }
+  template:
+    metadata:
+      labels: { app: filebeat }
+    spec:
+      serviceAccountName: filebeat
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: filebeat
+          image: docker.elastic.co/beats/filebeat:8.14.3
+          args: ["-c", "/etc/filebeat.yml", "-e"]
+          env:
+            - name: NODE_NAME
+              valueFrom: { fieldRef: { fieldPath: spec.nodeName } }
+          securityContext:
+            runAsUser: 0
+          volumeMounts:
+            - name: config
+              mountPath: /etc/filebeat.yml
+              subPath: filebeat.yml
+            - name: varlibdockercontainers
+              mountPath: /var/lib/docker/containers
+              readOnly: true
+            - name: varlog
+              mountPath: /var/log
+              readOnly: true
+      volumes:
+        - name: config
+          configMap: { name: filebeat-config }
+        - name: varlibdockercontainers
+          hostPath: { path: /var/lib/docker/containers }
+        - name: varlog
+          hostPath: { path: /var/log }
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: filebeat
+  namespace: swiftdrop
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: filebeat-reader
+rules:
+  - apiGroups: [""]
+    resources: ["namespaces", "pods", "nodes"]
+    verbs: ["get", "watch", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: filebeat-reader-binding
+subjects:
+  - kind: ServiceAccount
+    name: filebeat
+    namespace: swiftdrop
+roleRef:
+  kind: ClusterRole
+  name: filebeat-reader
+  apiGroup: rbac.authorization.k8s.io

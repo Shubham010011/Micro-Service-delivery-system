@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>SwiftDrop — Real-Time Delivery Tracking</title>
+<link rel="stylesheet" href="css/styles.css" />
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+</head>
+<body>
+
+<div class="navbar">
+  <div class="brand"><span class="dot"></span> SwiftDrop</div>
+</div>
+
+<div class="hero">
+  <h1>Real-time delivery, done right.</h1>
+  <p>Order, track, and chat with your delivery partner — live, end to end.</p>
+</div>
+
+<div class="card auth-card">
+  <div class="auth-toggle">
+    <button id="tabLogin" class="active" onclick="switchTab('login')">Log in</button>
+    <button id="tabRegister" onclick="switchTab('register')">Sign up</button>
+  </div>
+
+  <!-- LOGIN -->
+  <form id="loginForm" onsubmit="return handleLogin(event)">
+    <div class="field">
+      <label>Email</label>
+      <input class="input" type="email" id="loginEmail" required />
+    </div>
+    <div class="field">
+      <label>Password</label>
+      <input class="input" type="password" id="loginPassword" required />
+    </div>
+    <button class="btn btn-primary" style="width:100%" type="submit">Log in</button>
+  </form>
+
+  <!-- REGISTER -->
+  <form id="registerForm" style="display:none" onsubmit="return handleRegister(event)">
+    <div class="field">
+      <label>I am a</label>
+      <div class="role-pick">
+        <label><input type="radio" name="role" value="CUSTOMER" checked /><span>🧑 Customer</span></label>
+        <label><input type="radio" name="role" value="DELIVERY_PARTNER" /><span>🛵 Delivery Partner</span></label>
+      </div>
+    </div>
+    <div class="field">
+      <label>Full name</label>
+      <input class="input" type="text" id="regName" required />
+    </div>
+    <div class="field">
+      <label>Email</label>
+      <input class="input" type="email" id="regEmail" required />
+    </div>
+    <div class="field">
+      <label>Phone number</label>
+      <input class="input" type="tel" id="regPhone" placeholder="+1 555 000 0000" required />
+      <div class="order-meta">Kept private — never shared with the other party. Used only for account and delivery communication records.</div>
+    </div>
+    <div class="field">
+      <label>Password</label>
+      <input class="input" type="password" id="regPassword" minlength="8" required />
+    </div>
+    <button class="btn btn-primary" style="width:100%" type="submit">Create account</button>
+  </form>
+
+  <div class="divider">or continue with</div>
+  <div id="googleBtn"></div>
+</div>
+
+<script src="js/api.js"></script>
+<script>
+
+  function toast(message, type = 'info') {
+    const toast = document.createElement('div');
+    toast.textContent = message;
+
+    toast.style.position = 'fixed';
+    toast.style.bottom = '25px';
+    toast.style.right = '25px';
+    toast.style.padding = '12px 18px';
+    toast.style.background = type === 'error' ? '#dc3545' : '#198754';
+    toast.style.color = '#fff';
+    toast.style.borderRadius = '8px';
+    toast.style.zIndex = '9999';
+    toast.style.fontSize = '14px';
+
+    document.body.appendChild(toast);
+
+    setTimeout(() => {
+        toast.remove();
+    }, 3000);
+}
+  if (Auth.getToken() && Auth.getUser()) redirectByRole(Auth.getUser().role);
+
+  function redirectByRole(role) {
+    if (role === 'ADMIN') window.location.href = 'admin.html';
+    else if (role === 'DELIVERY_PARTNER') window.location.href = 'delivery.html';
+    else window.location.href = 'customer.html';
+  }
+
+  function switchTab(tab) {
+    document.getElementById('tabLogin').classList.toggle('active', tab === 'login');
+    document.getElementById('tabRegister').classList.toggle('active', tab === 'register');
+    document.getElementById('loginForm').style.display = tab === 'login' ? 'block' : 'none';
+    document.getElementById('registerForm').style.display = tab === 'register' ? 'block' : 'none';
+  }
+
+  async function handleLogin(e) {
+    e.preventDefault();
+    try {
+      const data = await api('/api/auth/login', {
+        auth: false,
+        method: 'POST',
+        body: { email: loginEmail.value, password: loginPassword.value }
+      });
+      Auth.setSession(data.token, data);
+      redirectByRole(data.role);
+    } catch (err) { toast(err.message, 'error'); }
+    return false;
+  }
+
+  async function handleRegister(e) {
+    e.preventDefault();
+    try {
+      const role = document.querySelector('input[name="role"]:checked').value;
+      const data = await api('/api/auth/register', {
+        auth: false,
+        method: 'POST',
+        body: {
+          name: regName.value, email: regEmail.value,
+          password: regPassword.value, phoneNumber: regPhone.value, role
+        }
+      });
+      Auth.setSession(data.token, data);
+      toast('Account created!', 'success');
+      redirectByRole(data.role);
+    } catch (err) { toast(err.message, 'error'); }
+    return false;
+  }
+
+  // ---- Google Sign-In ----
+  // Replace with your real OAuth Client ID (must match GOOGLE_CLIENT_ID configured in auth-service).
+  const GOOGLE_CLIENT_ID = 'REPLACE_WITH_YOUR_GOOGLE_OAUTH_CLIENT_ID';
+
+  window.onload = () => {
+  
+    google.accounts.id.initialize({ client_id: GOOGLE_CLIENT_ID, callback: onGoogleCredential });
+    google.accounts.id.renderButton(document.getElementById('googleBtn'), { theme: 'outline', size: 'large', width: 300 });
+  };
+
+  async function onGoogleCredential(response) {
+    try {
+      const role = document.querySelector('input[name="role"]:checked')?.value || 'CUSTOMER';
+      const data = await api('/api/auth/google', {
+        auth: false,
+        method: 'POST',
+        body: { idToken: response.credential, role }
+      });
+      Auth.setSession(data.token, data);
+      redirectByRole(data.role);
+    } catch (err) { toast(err.message, 'error'); }
+  }
+</script>
+</body>
+</html>

@@ -1,0 +1,52 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: notification-service
+  namespace: swiftdrop
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: notification-service }
+  template:
+    metadata:
+      labels: { app: notification-service }
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: "/actuator/prometheus"
+        prometheus.io/port: "8084"
+    spec:
+      containers:
+        - name: notification-service
+          image: swiftdrop/notification-service:1.0.0
+          ports: [{ containerPort: 8084 }]
+          envFrom:
+            - configMapRef: { name: swiftdrop-config }
+          env:
+            - name: DB_URL
+              value: jdbc:postgresql://postgres:5432/notificationdb
+            - name: JWT_SECRET
+              valueFrom: { secretKeyRef: { name: swiftdrop-secrets, key: JWT_SECRET } }
+            - name: DB_PASSWORD
+              valueFrom: { secretKeyRef: { name: swiftdrop-secrets, key: DB_PASSWORD } }
+          readinessProbe:
+            httpGet: { path: /actuator/health, port: 8084 }
+            initialDelaySeconds: 25
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /actuator/health, port: 8084 }
+            initialDelaySeconds: 40
+            periodSeconds: 15
+          resources:
+            requests: { cpu: "150m", memory: "384Mi" }
+            limits: { cpu: "750m", memory: "768Mi" }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: notification-service
+  namespace: swiftdrop
+spec:
+  selector: { app: notification-service }
+  ports:
+    - port: 8084
+      targetPort: 8084
